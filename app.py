@@ -24,7 +24,7 @@ if uploaded_file is not None:
 
     #ansosten Fehlermeldung anzeigen, dass der Dateityp nicht unterstützt wird und die Ausführung stoppen.
     else:
-        st.error("Dieser Dateityp wird noch nicht unterstützt.")
+        st.error("Dieser Dateityp wird noch nicht unterstützt.(csv, xlsx, json)")
         st.stop()
 
     #Anzeige das die Datei erfolgreich geladen wurde, damit der Benutzer weiß, dass der Upload funktioniert hat.

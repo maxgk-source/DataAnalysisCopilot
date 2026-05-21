@@ -15,3 +15,15 @@ min	kleinster Wert
 50%	Median / mittlerer Wert
 75%	oberes Viertel
 max	größter Wert
+
+
+
+Recherche ML Libras: 
+https://www.ibm.com/de-de/think/topics/machine-learning-libraries
+https://tech-now.io/en/blogs/top-10-best-python-libraries-for-machine-learning
+
+
+Spark Dataframes: 
+https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.html
+https://www.youtube.com/watch?v=VxSQdkNgs8U
+https://www.youtube.com/watch?v=UTpQxMtw58M
