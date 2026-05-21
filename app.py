@@ -8,19 +8,19 @@ st.title("Data Analysis Copilot")
 #Upload Feld für die Dateien
 uploaded_file = st.file_uploader("CSV-Datei hochladen", type=["csv"])
 
-#Wenn eine Datei hochgeladen wurde, führe ... aus. 
+#Wenn eine Datei hochgeladen wurde, teste Format und führe ... aus. 
 if uploaded_file is not None:
     #Den Dateinamen der Datei nehmen und gucken ob richtiges Format hochgeladen wurde. 
     file_name = uploaded_file.name
-    #wenn csv,xlsx oder txt Datei dann mit pandas lesen
+    #wenn csv,xlsx oder json Datei dann mit pandas lesen
     if file_name.endswith(".csv"):
         df = pd.read_csv(uploaded_file)
 
     elif file_name.endswith(".xlsx"):
         df = pd.read_excel(uploaded_file)
 
-    elif file_name.endswith(".txt"):
-        df = pd.read_csv(uploaded_file, sep=None, engine="python")    
+    elif file_name.endswith(".json"):
+        df = pd.read_json(uploaded_file, orient="records")
 
     #ansosten Fehlermeldung anzeigen, dass der Dateityp nicht unterstützt wird und die Ausführung stoppen.
     else:

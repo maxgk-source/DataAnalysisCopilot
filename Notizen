@@ -1,2 +1,15 @@
 dateien hochladen: https://docs.streamlit.io/develop/api-reference/widgets/st.file_uploader
 Analyse: https://pandas.pydata.org/docs/dev/reference/api/pandas.api.typing.DataFrameGroupBy.describe.html#pandas.api.typing.DataFrameGroupBy.describe
+python -m streamlit run app.py
+
+count	Anzahl vorhandener Werte
+unique	Anzahl unterschiedlicher Kategorien
+top	häufigster Wert
+freq	Häufigkeit des häufigsten Wertes
+mean	Durchschnitt
+std	Standardabweichung
+min	kleinster Wert
+25%	unteres Viertel
+50%	Median / mittlerer Wert
+75%	oberes Viertel
+max	größter Wert
