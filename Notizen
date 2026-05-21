@@ -1,7 +1,9 @@
 dateien hochladen: https://docs.streamlit.io/develop/api-reference/widgets/st.file_uploader
 Analyse: https://pandas.pydata.org/docs/dev/reference/api/pandas.api.typing.DataFrameGroupBy.describe.html#pandas.api.typing.DataFrameGroupBy.describe
+Seite personalisieren: https://docs.streamlit.io/1.53.0/develop/api-reference/configuration/st.set_page_config?utm_source=chatgpt.com
 python -m streamlit run app.py
 
+Tabellenanalyse: 
 count	Anzahl vorhandener Werte
 unique	Anzahl unterschiedlicher Kategorien
 top	häufigster Wert
