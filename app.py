@@ -38,7 +38,7 @@ from pyspark.sql import SparkSession
 # functions enthält Spark-Funktionen wie count, when, isnan, col usw.
 # importieren als F, damit der Code kürzer bleibt.
 from pyspark.sql import functions as F
-
+from mlanalysen import render_ml_analysis
 
 # PostgreSQL verbindt man über SQLAlchemy + psycopg2.
 try:
@@ -277,10 +277,7 @@ def render_spark_analysis(df_spark, source_name: str):
 
         # columns ist eine Liste aller Spaltennamen.
         column_count = len(df_spark.columns)
-
-        st.subheader("Spark-Analyse")
-        st.caption(f"Datenquelle: {source_name}")
-
+        
         # Zwei Spalten in der UI für Kennzahlen.
         metric_col_1, metric_col_2 = st.columns(2)
         metric_col_1.metric("Anzahl Zeilen", row_count)
@@ -472,7 +469,8 @@ with tab_database:
                     table_name=selected_table,
                     max_rows=max_rows if max_rows > 0 else None,
                 )
-
+                st.session_state["active_dataframe"] = pandas_dataframe
+                st.session_state["active_source_name"] = f"PostgreSQL-Tabelle: {selected_table}"
                 st.success(f"Tabelle '{selected_table}' wurde geladen.")
 
                 st.download_button( #erscheint erst wenn eine Tabelle geladen wurde. 
@@ -489,6 +487,28 @@ with tab_database:
 
             except Exception as error:
                 st.error(f"Die Tabelle konnte nicht geladen werden: {error}")
+
+st.divider()
+st.header("ML-Analyse starten")
+with st.expander("Einstellungen und Analyse öffnen", expanded=False):
+    if "active_dataframe" not in st.session_state:
+        st.info(
+            "Bitte lade zuerst eine PostgreSQL-Tabelle oder speichere eine CSV-Datei, "
+            "bevor du die ML-Analyse startest."
+        )
+    else:
+        st.success(
+            f"Aktive Datenquelle: "
+            f"{st.session_state.get('active_source_name', 'Aktive Datenquelle')}"
+        )
+
+        render_ml_analysis(
+            dataframe=st.session_state["active_dataframe"],
+            source_name=st.session_state.get(
+                "active_source_name",
+                "Aktive Datenquelle",
+            ),
+        )
 
 
 # TAB 2: CSV HOCHLADEN UND ALS POSTGRESQL-TABELLE SPEICHERN
@@ -550,11 +570,11 @@ with tab_upload:
                     config=database_config,
                     table_name=table_name,
                     if_exists=if_exists_mapping[if_exists_option],
-                )
+                ) 
 
-                st.success(
-                    f"CSV wurde als Tabelle '{table_name}' in PostgreSQL gespeichert."
-                )
+                st.session_state["active_dataframe"] = saved_dataframe
+                st.session_state["active_source_name"] = f"Hochgeladene CSV / PostgreSQL-Tabelle: {table_name}"
+                st.success(f"CSV wurde als Tabelle '{table_name}' in PostgreSQL gespeichert.")
 
                 st.write("Vorschau der gespeicherten Daten:")
                 st.dataframe(saved_dataframe.head(10), use_container_width=True)
