@@ -4,3 +4,4 @@ Was kannst du mir anhand dieser CSV sagen?“	LLM analysiert Datenprofil
 „Welche Spalten sind problematisch?“	LLM analysiert Datenprofil
 „Gib mir die Zeile mit höchstem year_of_study“	pandas direkt
 Komplexere Berechnungsfragen	LangChain-Agent als Fallback
+Was kannst du mir zu der Tabelle sagen ?
