@@ -8,14 +8,14 @@ Was diese App macht:
 5. Die Datenanalyse läuft anschließend über Apache Spark.
 """
 
+
 # io hilft uns, Bytes wie eine Datei zu behandeln.
 # Das brauchen wir, wenn Streamlit eine CSV-Datei hochlädt.
 import io
 # os hilft beim Arbeiten mit Betriebssystem-Funktionen:
-# z. B. Umgebungsvariablen lesen oder temporäre Dateien löschen.
 import os
 # re steht für Regular Expressions.
-# Damit können wir Texte bereinigen, z. B. ungültige Zeichen aus Tabellennamen entfernen.
+# Damit kann man Texte bereinigen, z. B. ungültige Zeichen aus Tabellennamen entfernen.
 import re
 # tempfile erstellt temporäre Dateien.
 # Spark liest CSV-Dateien am einfachsten über einen Dateipfad.
@@ -38,7 +38,7 @@ from pyspark.sql import SparkSession
 # functions enthält Spark-Funktionen wie count, when, isnan, col usw.
 # importieren als F, damit der Code kürzer bleibt.
 from pyspark.sql import functions as F
-from mlanalysen import render_ml_analysis
+from langchain_agent import render_langchain_agent
 
 # PostgreSQL verbindt man über SQLAlchemy + psycopg2.
 try:
@@ -420,17 +420,30 @@ if st.sidebar.button("PostgreSQL-Verbindung testen"):
         st.sidebar.error(f"Verbindung fehlgeschlagen: {error}")
 
 
-# HAUPTBEREICH: ZWEI TABS
-# Tab 1: Tabellen aus PostgreSQL laden und analysieren.
-# Tab 2: CSV hochladen und in PostgreSQL speichern.
+# HAUPTBEREICH: DREI BEREICHE
+# Bereich 1: Tabellen aus PostgreSQL laden und analysieren.
+# Bereich 2: CSV hochladen und in PostgreSQL speichern.
+# Bereich 3: KI-Chat mit LangChain-Agent.
 
-tab_database, tab_upload = st.tabs(
-    ["Aus PostgreSQL laden & analysieren", "CSV hochladen & in PostgreSQL speichern"]
+TAB_DATABASE = "Aus PostgreSQL laden & analysieren"
+TAB_UPLOAD = "CSV hochladen & in PostgreSQL speichern"
+TAB_CHAT = "KI-Chat"
+
+selected_main_tab = st.radio(
+    "Bereich",
+    options=[TAB_DATABASE, TAB_UPLOAD, TAB_CHAT],
+    horizontal=True,
+    key="selected_main_tab",
 )
+
+previous_main_tab = st.session_state.get("previous_main_tab")
+if previous_main_tab is not None and previous_main_tab != selected_main_tab:
+    st.session_state["chat_messages"] = []
+st.session_state["previous_main_tab"] = selected_main_tab
 
 
 # TAB 1: AUS POSTGRESQL LADEN UND ANALYSIEREN
-with tab_database:
+if selected_main_tab == TAB_DATABASE:
     st.header("Daten aus PostgreSQL analysieren")
 
 
@@ -488,31 +501,8 @@ with tab_database:
             except Exception as error:
                 st.error(f"Die Tabelle konnte nicht geladen werden: {error}")
 
-st.divider()
-st.header("ML-Analyse starten")
-with st.expander("Einstellungen und Analyse öffnen", expanded=False):
-    if "active_dataframe" not in st.session_state:
-        st.info(
-            "Bitte lade zuerst eine PostgreSQL-Tabelle oder speichere eine CSV-Datei, "
-            "bevor du die ML-Analyse startest."
-        )
-    else:
-        st.success(
-            f"Aktive Datenquelle: "
-            f"{st.session_state.get('active_source_name', 'Aktive Datenquelle')}"
-        )
-
-        render_ml_analysis(
-            dataframe=st.session_state["active_dataframe"],
-            source_name=st.session_state.get(
-                "active_source_name",
-                "Aktive Datenquelle",
-            ),
-        )
-
-
 # TAB 2: CSV HOCHLADEN UND ALS POSTGRESQL-TABELLE SPEICHERN
-with tab_upload:
+elif selected_main_tab == TAB_UPLOAD:
     st.header("CSV-Datei hochladen und in PostgreSQL speichern")
 
     uploaded_file = st.file_uploader( # hochladen einer csv datei 
@@ -598,3 +588,34 @@ with tab_upload:
                 csv_bytes=uploaded_file.getvalue(),
                 source_name=f"Hochgeladene CSV: {uploaded_file.name}",
             )
+
+        # Hochgeladenes DataFrame für den Agenten im Session State merken
+        if uploaded_file is not None:
+            try:
+                import io as _io
+                import pandas as _pd
+                _df_upload = _pd.read_csv(_io.BytesIO(uploaded_file.getvalue()))
+                st.session_state["uploaded_dataframe"] = _df_upload
+                st.session_state["uploaded_source_name"] = (
+                    f"Hochgeladene CSV: {uploaded_file.name}"
+                )
+            except Exception:
+                pass  # Spark übernimmt die eigentliche Analyse
+
+
+# ---------------------------------------------------------------------------
+# TAB 3: KI-CHAT MIT LANGCHAIN-AGENT
+# ---------------------------------------------------------------------------
+elif selected_main_tab == TAB_CHAT:
+    _uploaded_df = st.session_state.get("uploaded_dataframe", None)
+    _db_df = st.session_state.get("active_dataframe", None)
+    _db_source = st.session_state.get("active_source_name", "Datenbanktabelle")
+
+    render_langchain_agent(
+        uploaded_df=_uploaded_df,
+        db_df=_db_df,
+        db_source_name=_db_source,
+        database_config=database_config,
+        list_database_tables_func=list_database_tables,
+        load_table_from_database_func=load_table_from_database,
+    )
