@@ -33,7 +33,9 @@ def _candidate_secret_paths() -> list[Path]:
     here = Path(__file__).resolve().parent
     cwd = Path.cwd().resolve()
     return [
+        cwd / ".streamlit" / "local_secrets.toml",
         cwd / ".streamlit" / "secrets.toml",
+        here / ".streamlit" / "local_secrets.toml",
         here / ".streamlit" / "secrets.toml",
         Path.home() / ".streamlit" / "secrets.toml",
     ]

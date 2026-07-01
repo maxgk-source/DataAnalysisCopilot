@@ -7,5 +7,6 @@ psycopg2-binary
 langchain
 langchain-openai
 langchain-experimental
+e2b-code-interpreter
 tabulate
 openpyxl

@@ -3,7 +3,7 @@ Streamlit-UI fuer den KI-Chat im Data Analysis Copilot.
 """
 
 import io
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 import streamlit as st
@@ -36,6 +36,14 @@ def _read_uploaded_file(uploaded_file) -> pd.DataFrame:
     raise ValueError("Nur CSV-, JSON- und Excel-Dateien werden unterstützt.")
 
 
+def _render_chat_payload(message: dict[str, Any]) -> None:
+    """Rendert Markdown und optionale Sandbox-Grafiken im Chat."""
+    st.markdown(str(message.get("content", "")))
+    figure_bytes = message.get("figure_bytes")
+    if figure_bytes:
+        st.image(figure_bytes)
+
+
 def render_langchain_agent(
     uploaded_df: Optional[pd.DataFrame] = None,
     db_df: Optional[pd.DataFrame] = None,
@@ -61,6 +69,7 @@ def render_langchain_agent(
     api_key = _read_secret_or_env("ACADEMICCLOUD_API_KEY")
     api_base = _read_secret_or_env("ACADEMICCLOUD_API_BASE", DEFAULT_ACADEMICCLOUD_API_BASE)
     configured_model = _read_secret_or_env("ACADEMICCLOUD_MODEL", DEFAULT_ACADEMICCLOUD_MODEL)
+    e2b_api_key = _read_secret_or_env("E2B_API_KEY")
 
     available_models: list[str] = []
     model_options = list(FALLBACK_ACADEMICCLOUD_MODELS)
@@ -108,6 +117,15 @@ def render_langchain_agent(
             step=0.1,
             help="0.0 ist für Datenanalyse meistens am reproduzierbarsten.",
         )
+
+        st.divider()
+        st.write("**Code-Sandbox:** immer aktiv")
+        if e2b_api_key:
+            st.caption("E2B_API_KEY gefunden. Vom Agenten erzeugter Python-Code laeuft isoliert in E2B.")
+        else:
+            st.caption(
+                "E2B_API_KEY fehlt. Code-Ausfuehrung bleibt gesperrt, statt unsicher lokal zu laufen."
+            )
 
     if not api_key:
         st.error(
@@ -241,7 +259,7 @@ def render_langchain_agent(
 
     for message in st.session_state["chat_messages"]:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            _render_chat_payload(message)
 
     prompt = st.chat_input(
         "Analyseauftrag eingeben, z. B. 'Welche Spalten haben die meisten fehlenden Werte?'"
@@ -255,8 +273,9 @@ def render_langchain_agent(
 
         with st.chat_message("assistant"):
             with st.spinner("Agent analysiert die Daten..."):
+                answer_message: dict[str, Any]
                 try:
-                    answer = _run_agent(
+                    agent_result = _run_agent(
                         dataframe=chat_dataframe,
                         source_name=chat_source_name,
                         user_prompt=prompt,
@@ -264,8 +283,14 @@ def render_langchain_agent(
                         api_base=api_base,
                         model=model,
                         temperature=temperature,
+                        use_sandbox=True,
+                        sandbox_api_key=e2b_api_key,
                     )
-                    st.markdown(answer)
+                    if isinstance(agent_result, dict):
+                        answer_message = {"role": "assistant", **agent_result}
+                    else:
+                        answer_message = {"role": "assistant", "content": str(agent_result)}
+                    _render_chat_payload(answer_message)
                 except Exception as error:
                     error_text = str(error)
                     if "Model Not Found" in error_text or "model" in error_text.lower() and "not found" in error_text.lower():
@@ -293,5 +318,6 @@ def render_langchain_agent(
                         st.markdown(answer)
                     else:
                         st.error(answer)
+                    answer_message = {"role": "assistant", "content": answer}
 
-        st.session_state["chat_messages"].append({"role": "assistant", "content": answer})
+        st.session_state["chat_messages"].append(answer_message)

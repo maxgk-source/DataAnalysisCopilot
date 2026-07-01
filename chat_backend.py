@@ -3,10 +3,18 @@ Backend-Logik fuer den KI-Chat: LLM, Agent und direkte pandas-Auswertungen.
 """
 
 import re
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 import streamlit as st
+
+from sandbox_code_executor import (
+    SandboxUnavailableError,
+    UnsafeGeneratedCodeError,
+    execute_code_in_sandbox,
+    strip_code_fences,
+    validate_generated_code,
+)
 
 
 @st.cache_resource(show_spinner=False)
@@ -36,38 +44,6 @@ def _get_llm(api_key: str, api_base: str, model: str, temperature: float):
             openai_api_base=api_base,
             temperature=temperature,
         )
-
-
-def _create_dataframe_agent(dataframe: pd.DataFrame, api_key: str, api_base: str, model: str, temperature: float):
-    """Baut den LangChain Pandas DataFrame Agent."""
-    try:
-        from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
-    except ImportError:
-        try:
-            from langchain_experimental.agents import create_pandas_dataframe_agent
-        except ImportError as error:
-            raise ImportError(
-                "Das Paket 'langchain-experimental' fehlt. Installiere es mit: "
-                "pip install langchain-experimental"
-            ) from error
-
-    llm = _get_llm(
-        api_key=api_key,
-        api_base=api_base,
-        model=model,
-        temperature=temperature,
-    )
-
-    return create_pandas_dataframe_agent(
-        llm=llm,
-        df=dataframe,
-        verbose=False,
-        allow_dangerous_code=True,
-        max_iterations=30,
-        max_execution_time=180,
-        early_stopping_method="generate",
-        agent_executor_kwargs={"handle_parsing_errors": True},
-    )
 
 
 def _column_name_in_prompt(prompt: str, dataframe: pd.DataFrame) -> Optional[str]:
@@ -142,6 +118,47 @@ def _safe_markdown_table(dataframe: pd.DataFrame, max_rows: int = 20, index: boo
         return dataframe.head(max_rows).to_markdown(index=index)
     except Exception:
         return "```text\n" + dataframe.head(max_rows).to_string(index=index) + "\n```"
+
+
+def _truncate_text(text: str, max_chars: int = 5000) -> str:
+    """Verhindert sehr lange Chat-Ausgaben aus Sandbox-Logs."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...[gekuerzt]"
+
+
+def _looks_like_sandboxed_code_request(user_prompt: str) -> bool:
+    """Erkennt Fragen, bei denen der Agent wahrscheinlich Python-Code braucht."""
+    prompt_lower = user_prompt.lower()
+    sandbox_keywords = [
+        "ausfuehren",
+        "ausführen",
+        "berechne",
+        "calculate",
+        "chart",
+        "code",
+        "correlation",
+        "diagramm",
+        "durchschnitt",
+        "filtere",
+        "grafik",
+        "groupby",
+        "gruppiere",
+        "histogramm",
+        "korrelation",
+        "median",
+        "plot",
+        "pivot",
+        "python",
+        "regression",
+        "scatter",
+        "sortiere",
+        "standardabweichung",
+        "verteilung",
+        "visualisiere",
+        "visualisierung",
+    ]
+    return any(keyword in prompt_lower for keyword in sandbox_keywords)
 
 
 def _build_direct_dataset_overview(dataframe: pd.DataFrame, source_name: str) -> str:
@@ -420,8 +437,125 @@ Analyseauftrag des Users:
     return str(content)
 
 
-def _run_agent(dataframe: pd.DataFrame, source_name: str, user_prompt: str, api_key: str, api_base: str, model: str, temperature: float) -> str:
-    """Führt den Analyseauftrag über direkte pandas-Logik oder den LangChain-Agenten aus."""
+def _generate_sandbox_code(
+    dataframe: pd.DataFrame,
+    source_name: str,
+    user_prompt: str,
+    api_key: str,
+    api_base: str,
+    model: str,
+    temperature: float,
+) -> str:
+    """Laesst das LLM kurzen pandas-Code fuer die Sandbox erzeugen."""
+    llm = _get_llm(api_key=api_key, api_base=api_base, model=model, temperature=temperature)
+    data_profile = _data_profile_for_llm(dataframe, source_name)
+
+    prompt = f"""
+Du erzeugst Python-Code fuer eine isolierte E2B-Sandbox.
+Antworte ausschliesslich mit Python-Code, ohne Markdown und ohne Erklaertext.
+
+Verfuegbare Variablen und Bibliotheken:
+- df: pandas DataFrame mit den Daten
+- pd, np, plt, sns
+
+Regeln:
+- Fuehre keine Datei-, Netzwerk-, Shell-, Betriebssystem- oder Secret-Zugriffe aus.
+- Nutze keine open/eval/exec/compile/globals/locals und keine os/sys/subprocess/socket/requests/urllib/pathlib/shutil APIs.
+- Importiere nichts ausser pandas, numpy, matplotlib, seaborn, math oder statistics.
+- Veraendere df nur auf Kopien, wenn die Originaldaten erhalten bleiben sollten.
+- Drucke eine kurze deutsche Antwort mit print().
+- Wenn ein tabellarisches Ergebnis sinnvoll ist, speichere es als pandas DataFrame oder Series in der Variable result.
+- Wenn ein Diagramm sinnvoll ist, erstelle es mit matplotlib/seaborn. Es wird automatisch gespeichert.
+- Halte die Ausgabe kompakt und fachlich direkt.
+
+Datenprofil:
+{data_profile}
+
+Analyseauftrag:
+{user_prompt}
+""".strip()
+
+    response = llm.invoke(prompt)
+    content = getattr(response, "content", response)
+    code = strip_code_fences(str(content))
+    validate_generated_code(code)
+    return code
+
+
+def _format_sandbox_execution(execution: dict[str, Any], source_name: str) -> str:
+    """Formatiert Text, Tabelle, Plot-Hinweis und Fehler aus der Sandbox."""
+    sections = [f"Sichere Sandbox-Auswertung fuer **{source_name}**."]
+
+    output = str(execution.get("output") or "").strip()
+    if output:
+        sections.append("```text\n" + _truncate_text(output) + "\n```")
+
+    table = execution.get("table")
+    if isinstance(table, pd.DataFrame) and not table.empty:
+        sections.append("Ergebnis-Tabelle:\n\n" + _safe_markdown_table(table, max_rows=30, index=False))
+
+    if execution.get("figure_bytes"):
+        sections.append("Ein Diagramm wurde in der Sandbox erzeugt und wird unter dieser Antwort angezeigt.")
+
+    error = str(execution.get("error") or "").strip()
+    if error:
+        sections.append("Sandbox-Fehler:\n\n```text\n" + _truncate_text(error, max_chars=3000) + "\n```")
+
+    if len(sections) == 1:
+        sections.append("Die Sandbox-Ausfuehrung wurde beendet, hat aber keine Ausgabe geliefert.")
+
+    return "\n\n".join(sections)
+
+
+def _run_sandboxed_code_analysis(
+    dataframe: pd.DataFrame,
+    source_name: str,
+    user_prompt: str,
+    api_key: str,
+    api_base: str,
+    model: str,
+    temperature: float,
+    sandbox_api_key: Optional[str],
+) -> dict[str, Any]:
+    """Generiert Analyse-Code und fuehrt ihn in E2B aus."""
+    if not sandbox_api_key:
+        raise SandboxUnavailableError(
+            "E2B_API_KEY fehlt. Ohne E2B wird kein vom Agenten erzeugter Code lokal ausgefuehrt."
+        )
+
+    code = _generate_sandbox_code(
+        dataframe=dataframe,
+        source_name=source_name,
+        user_prompt=user_prompt,
+        api_key=api_key,
+        api_base=api_base,
+        model=model,
+        temperature=temperature,
+    )
+    execution = execute_code_in_sandbox(
+        code=code,
+        dataframe=dataframe,
+        api_key=sandbox_api_key,
+    )
+    return {
+        "content": _format_sandbox_execution(execution, source_name),
+        "figure_bytes": execution.get("figure_bytes"),
+        "code": code,
+    }
+
+
+def _run_agent(
+    dataframe: pd.DataFrame,
+    source_name: str,
+    user_prompt: str,
+    api_key: str,
+    api_base: str,
+    model: str,
+    temperature: float,
+    use_sandbox: bool = False,
+    sandbox_api_key: Optional[str] = None,
+) -> str | dict[str, Any]:
+    """Fuehrt den Analyseauftrag sicher aus."""
     direct_answer = _try_direct_pandas_answer(
         dataframe=dataframe,
         source_name=source_name,
@@ -430,10 +564,30 @@ def _run_agent(dataframe: pd.DataFrame, source_name: str, user_prompt: str, api_
     if direct_answer:
         return direct_answer
 
-    # v6: Freitextfragen werden vom LLM anhand eines vorab berechneten Datenprofils
-    # beantwortet. Der LangChain-Pandas-Agent bleibt als Fallback für komplexe
-    # Code-/Berechnungsfragen erhalten, aber allgemeine CSV-Analysen laufen nicht
-    # mehr in Agent-Schleifen.
+    if use_sandbox and _looks_like_sandboxed_code_request(user_prompt):
+        try:
+            return _run_sandboxed_code_analysis(
+                dataframe=dataframe,
+                source_name=source_name,
+                user_prompt=user_prompt,
+                api_key=api_key,
+                api_base=api_base,
+                model=model,
+                temperature=temperature,
+                sandbox_api_key=sandbox_api_key,
+            )
+        except (SandboxUnavailableError, UnsafeGeneratedCodeError) as sandbox_error:
+            return (
+                "Die sichere Code-Sandbox konnte nicht genutzt werden: "
+                f"{sandbox_error}\n\n"
+                "Ich fuehre deshalb keinen generierten Python-Code lokal aus. "
+                "Du kannst E2B mit `E2B_API_KEY` konfigurieren oder die Frage ohne Code-Ausfuehrung stellen."
+            )
+
+    # Freitextfragen werden zuerst vom LLM anhand eines vorab berechneten
+    # Datenprofils beantwortet. Wenn dieser reine LLM-Call fehlschlaegt, wird
+    # optional die E2B-Sandbox probiert. Ein lokaler Dangerous-Code-Agent wird
+    # aus Sicherheitsgruenden nicht mehr verwendet.
     try:
         return _run_llm_profile_analysis(
             dataframe=dataframe,
@@ -445,39 +599,28 @@ def _run_agent(dataframe: pd.DataFrame, source_name: str, user_prompt: str, api_
             temperature=temperature,
         )
     except Exception as llm_error:
-        # Wenn der reine LLM-Call fehlschlägt, versuchen wir den LangChain-Agenten
-        # als Fallback. Der ursprüngliche Fehler wird danach sichtbar gemacht.
-        try:
-            agent = _create_dataframe_agent(
-                dataframe=dataframe,
-                api_key=api_key,
-                api_base=api_base,
-                model=model,
-                temperature=temperature,
-            )
-            system_context = f"""
-Du bist ein deutschsprachiger Data-Analysis-Copilot.
-Analysiere ausschließlich den bereitgestellten pandas DataFrame `df`.
-Erfinde keine Werte. Wenn eine Aussage nicht aus den Daten ableitbar ist, sage das klar.
-Gib konkrete Zahlen, Spaltennamen und kurze Begründungen an.
-Antworte direkt und vermeide unnötige Zwischenschritte.
+        if use_sandbox:
+            try:
+                return _run_sandboxed_code_analysis(
+                    dataframe=dataframe,
+                    source_name=source_name,
+                    user_prompt=user_prompt,
+                    api_key=api_key,
+                    api_base=api_base,
+                    model=model,
+                    temperature=temperature,
+                    sandbox_api_key=sandbox_api_key,
+                )
+            except Exception as sandbox_error:
+                raise RuntimeError(
+                    f"LLM-Profilanalyse fehlgeschlagen: {llm_error}; "
+                    f"E2B-Sandbox-Fallback fehlgeschlagen: {sandbox_error}"
+                ) from sandbox_error
 
-Datenquelle: {source_name}
-
-DataFrame-Übersicht:
-{_dataframe_overview(dataframe)}
-
-Analyseauftrag des Users:
-{user_prompt}
-""".strip()
-            response = agent.invoke({"input": system_context})
-            if isinstance(response, dict):
-                return str(response.get("output", response))
-            return str(response)
-        except Exception as agent_error:
-            raise RuntimeError(
-                f"LLM-Profilanalyse fehlgeschlagen: {llm_error}; "
-                f"LangChain-Agent-Fallback fehlgeschlagen: {agent_error}"
-            )
+        raise RuntimeError(
+            f"LLM-Profilanalyse fehlgeschlagen: {llm_error}; "
+            "lokale Agent-Code-Ausfuehrung ist aus Sicherheitsgruenden deaktiviert. "
+            "Aktiviere die E2B-Sandbox mit E2B_API_KEY, wenn der Agent Python-Code ausfuehren soll."
+        ) from llm_error
 
 
