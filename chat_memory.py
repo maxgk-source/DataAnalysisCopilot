@@ -91,7 +91,14 @@ def _clean_message_for_storage(message: dict[str, Any]) -> dict[str, Any] | None
     return clean_message
 
 
-def save_chat(messages: list[dict[str, Any]], source_name: str, title: str | None = None) -> str:
+def _build_chat_record(
+    messages: list[dict[str, Any]],
+    source_name: str,
+    title: str | None = None,
+    chat_id: str | None = None,
+    existing_chat: dict[str, Any] | None = None,
+    autosaved: bool = False,
+) -> dict[str, Any]:
     clean_messages = []
     for message in messages:
         clean_message = _clean_message_for_storage(message)
@@ -101,22 +108,54 @@ def save_chat(messages: list[dict[str, Any]], source_name: str, title: str | Non
     if not clean_messages:
         raise ValueError("Es gibt noch keine Chatnachrichten zum Speichern.")
 
-    items = _load_store()
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    item_id = uuid.uuid4().hex
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    item_id = chat_id or uuid.uuid4().hex
     auto_title = clean_messages[0]["content"][:70].strip() or "Gespeicherter Chat"
-    items.insert(
-        0,
-        {
-            "id": item_id,
-            "title": title.strip() if title and title.strip() else auto_title,
-            "source_name": source_name,
-            "created_at": created_at,
-            "messages": clean_messages,
-        },
+    existing_title = str((existing_chat or {}).get("title", "")).strip()
+    title_text = title.strip() if title and title.strip() else existing_title or auto_title
+
+    return {
+        "id": item_id,
+        "title": title_text,
+        "source_name": source_name,
+        "created_at": str((existing_chat or {}).get("created_at") or now),
+        "updated_at": now,
+        "autosaved": autosaved or bool((existing_chat or {}).get("autosaved")),
+        "messages": clean_messages,
+    }
+
+
+def upsert_chat(
+    messages: list[dict[str, Any]],
+    source_name: str,
+    title: str | None = None,
+    chat_id: str | None = None,
+    autosaved: bool = False,
+) -> dict[str, Any]:
+    items = _load_store()
+    existing_chat = None
+    if chat_id:
+        for index, item in enumerate(items):
+            if item.get("id") == chat_id:
+                existing_chat = items.pop(index)
+                break
+
+    chat = _build_chat_record(
+        messages=messages,
+        source_name=source_name,
+        title=title,
+        chat_id=chat_id,
+        existing_chat=existing_chat,
+        autosaved=autosaved,
     )
+    items.insert(0, chat)
     _save_store(items)
-    return item_id
+    return chat
+
+
+def save_chat(messages: list[dict[str, Any]], source_name: str, title: str | None = None, chat_id: str | None = None) -> str:
+    chat = upsert_chat(messages=messages, source_name=source_name, title=title, chat_id=chat_id)
+    return str(chat["id"])
 
 
 def _clean_loaded_messages(messages: Any) -> list[dict[str, Any]]:
@@ -149,6 +188,32 @@ def load_chat(chat_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _remember_opened_chat(chat: dict[str, Any]) -> None:
+    st.session_state["opened_saved_chat_id"] = str(chat.get("id", ""))
+    st.session_state["opened_saved_chat_title"] = str(chat.get("title", "Gespeicherter Chat"))
+    st.session_state["opened_saved_chat_source_name"] = str(chat.get("source_name", ""))
+
+
+def autosave_current_chat(messages: list[dict[str, Any]], source_name: str) -> dict[str, Any] | None:
+    if not messages:
+        return None
+
+    try:
+        chat = upsert_chat(
+            messages=messages,
+            source_name=source_name,
+            chat_id=st.session_state.get("opened_saved_chat_id"),
+            autosaved=True,
+        )
+        _remember_opened_chat(chat)
+        st.session_state["chat_autosave_last_saved_at"] = str(chat.get("updated_at", ""))
+        st.session_state.pop("chat_autosave_error", None)
+        return chat
+    except Exception as error:
+        st.session_state["chat_autosave_error"] = str(error)
+        return None
+
+
 def delete_chat(chat_id: str) -> None:
     items = [item for item in _load_store() if item.get("id") != chat_id]
     _save_store(items)
@@ -164,14 +229,11 @@ def open_saved_chat(chat_id: str) -> None:
         raise ValueError("Der gespeicherte Chat enthält keine lesbaren Nachrichten.")
 
     st.session_state["chat_messages"] = messages
-    st.session_state["opened_saved_chat_id"] = str(chat.get("id", ""))
-    st.session_state["opened_saved_chat_title"] = str(chat.get("title", "Gespeicherter Chat"))
-    st.session_state["opened_saved_chat_source_name"] = str(chat.get("source_name", ""))
+    _remember_opened_chat(chat)
 
 
 def render_chat_memory_panel() -> None:
     st.subheader("Chat-Speicher")
-    st.caption("Speichert Chatverlaeufe lokal auf deinem Rechner.")
 
     opened_title = st.session_state.get("opened_saved_chat_title")
     if opened_title:
@@ -183,18 +245,10 @@ def render_chat_memory_panel() -> None:
                 f"Gespeichert mit: {opened_source}. Aktive Datenquelle fuer neue Fragen: {active_source}."
             )
 
-    messages = st.session_state.get("chat_messages", [])
-    source_name = st.session_state.get("chat_source_name", "Keine Datenquelle")
-    title = st.text_input("Titel", value="", placeholder="z. B. Missing-Values Analyse", key="chat_save_title")
+    autosave_error = st.session_state.get("chat_autosave_error")
+    if autosave_error:
+        st.warning(f"Autosave fehlgeschlagen: {autosave_error}")
 
-    if st.button("Aktuellen Chat speichern", key="save_current_chat", use_container_width=True):
-        try:
-            save_chat(messages=messages, source_name=source_name, title=title)
-            st.success("Chat gespeichert.")
-        except Exception as error:
-            st.error(f"Chat konnte nicht gespeichert werden: {error}")
-
-    st.divider()
     saved_chats = list_chats()
     st.caption(f"Gespeicherte Chats: {len(saved_chats)}")
 
@@ -222,4 +276,6 @@ def render_chat_memory_panel() -> None:
                         st.session_state.pop("opened_saved_chat_id", None)
                         st.session_state.pop("opened_saved_chat_title", None)
                         st.session_state.pop("opened_saved_chat_source_name", None)
+                        st.session_state.pop("chat_autosave_last_saved_at", None)
+                        st.session_state.pop("chat_autosave_error", None)
                     st.rerun()

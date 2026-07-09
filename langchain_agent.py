@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 import pandas as pd
 import streamlit as st
 
+from chat_memory import autosave_current_chat
 from chat_backend import _build_direct_dataset_overview, _run_agent
 from chat_config import (
     DEFAULT_ACADEMICCLOUD_API_BASE,
@@ -70,6 +71,9 @@ def _set_chat_dataframe(dataframe: pd.DataFrame, source_name: str, reset_on_chan
         st.session_state.pop("opened_saved_chat_id", None)
         st.session_state.pop("opened_saved_chat_title", None)
         st.session_state.pop("opened_saved_chat_source_name", None)
+        st.session_state.pop("chat_autosave_last_saved_at", None)
+        st.session_state.pop("chat_autosave_error", None)
+        st.session_state.pop("pending_chat_prompt", None)
     return source_changed
 
 
@@ -329,6 +333,9 @@ def render_langchain_agent(
                 st.session_state.pop("opened_saved_chat_id", None)
                 st.session_state.pop("opened_saved_chat_title", None)
                 st.session_state.pop("opened_saved_chat_source_name", None)
+                st.session_state.pop("chat_autosave_last_saved_at", None)
+                st.session_state.pop("chat_autosave_error", None)
+                st.session_state.pop("pending_chat_prompt", None)
                 st.rerun()
 
             chat_container = st.container()
@@ -356,6 +363,9 @@ def render_langchain_agent(
         st.session_state.pop("opened_saved_chat_id", None)
         st.session_state.pop("opened_saved_chat_title", None)
         st.session_state.pop("opened_saved_chat_source_name", None)
+        st.session_state.pop("chat_autosave_last_saved_at", None)
+        st.session_state.pop("chat_autosave_error", None)
+        st.session_state.pop("pending_chat_prompt", None)
         st.rerun()
 
     chat_container = st.container()
@@ -364,17 +374,23 @@ def render_langchain_agent(
             with st.chat_message(message["role"]):
                 _render_chat_payload(message)
 
-    with st.form("chat_prompt_form", clear_on_submit=True):
-        prompt_input = st.text_area(
-            "Analyseauftrag",
-            placeholder="Analyseauftrag eingeben, z. B. 'Welche Spalten haben die meisten fehlenden Werte?'",
-            height=80,
-            key="chat_prompt_input",
-            label_visibility="collapsed",
-        )
-        submitted = st.form_submit_button("Senden", use_container_width=True)
+    pending_prompt = str(st.session_state.pop("pending_chat_prompt", "")).strip()
+    prompt = pending_prompt
 
-    prompt = prompt_input.strip() if submitted else ""
+    if not pending_prompt:
+        with st.form("chat_prompt_form", clear_on_submit=True):
+            prompt_input = st.text_area(
+                "Analyseauftrag",
+                placeholder="Analyseauftrag eingeben, z. B. 'Welche Spalten haben die meisten fehlenden Werte?'",
+                height=80,
+                key="chat_prompt_input",
+                label_visibility="collapsed",
+            )
+            submitted = st.form_submit_button("Senden", use_container_width=True)
+
+        if submitted and prompt_input.strip():
+            st.session_state["pending_chat_prompt"] = prompt_input.strip()
+            st.rerun()
 
     if prompt:
         previous_messages = list(st.session_state["chat_messages"])
@@ -436,3 +452,5 @@ def render_langchain_agent(
                         answer_message = {"role": "assistant", "content": answer}
 
         st.session_state["chat_messages"].append(answer_message)
+        autosave_current_chat(st.session_state["chat_messages"], chat_source_name)
+        st.rerun()
