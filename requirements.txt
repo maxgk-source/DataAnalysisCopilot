@@ -1,12 +1,10 @@
 #diese Requirments wurden im laufe des Porjektes installiert.
 streamlit
 pandas
-pyspark
 sqlalchemy
 psycopg2-binary
 langchain
 langchain-openai
-langchain-experimental
 e2b-code-interpreter
 tabulate
 openpyxl

@@ -446,7 +446,7 @@ def _generate_sandbox_code(
     model: str,
     temperature: float,
 ) -> str:
-    """Laesst das LLM kurzen pandas-Code fuer die Sandbox erzeugen."""
+    """Laesst das LLM pandas-Code fuer die Sandbox erzeugen."""
     llm = _get_llm(api_key=api_key, api_base=api_base, model=model, temperature=temperature)
     data_profile = _data_profile_for_llm(dataframe, source_name)
 
@@ -459,16 +459,17 @@ Verfuegbare Variablen und Bibliotheken:
 - pd, np, plt, sns
 
 Regeln:
+- Beantworte den Analyseauftrag durch Berechnungen direkt auf df, nicht nur anhand des Datenprofils.
 - Fuehre keine Datei-, Netzwerk-, Shell-, Betriebssystem- oder Secret-Zugriffe aus.
 - Nutze keine open/eval/exec/compile/globals/locals und keine os/sys/subprocess/socket/requests/urllib/pathlib/shutil APIs.
 - Importiere nichts ausser pandas, numpy, matplotlib, seaborn, math oder statistics.
 - Veraendere df nur auf Kopien, wenn die Originaldaten erhalten bleiben sollten.
-- Drucke eine kurze deutsche Antwort mit print().
+- Drucke eine deutsche Antwort mit den wichtigsten Ergebnissen per print().
 - Wenn ein tabellarisches Ergebnis sinnvoll ist, speichere es als pandas DataFrame oder Series in der Variable result.
 - Wenn ein Diagramm sinnvoll ist, erstelle es mit matplotlib/seaborn. Es wird automatisch gespeichert.
 - Halte die Ausgabe kompakt und fachlich direkt.
 
-Datenprofil:
+Datenprofil nur als Orientierung fuer Spalten, Datentypen und Beispielwerte:
 {data_profile}
 
 Analyseauftrag:
@@ -555,16 +556,8 @@ def _run_agent(
     use_sandbox: bool = False,
     sandbox_api_key: Optional[str] = None,
 ) -> str | dict[str, Any]:
-    """Fuehrt den Analyseauftrag sicher aus."""
-    direct_answer = _try_direct_pandas_answer(
-        dataframe=dataframe,
-        source_name=source_name,
-        user_prompt=user_prompt,
-    )
-    if direct_answer:
-        return direct_answer
-
-    if use_sandbox and _looks_like_sandboxed_code_request(user_prompt):
+    """Fuehrt den Analyseauftrag als Sandbox-Code auf dem echten DataFrame aus."""
+    if use_sandbox:
         try:
             return _run_sandboxed_code_analysis(
                 dataframe=dataframe,
@@ -584,10 +577,8 @@ def _run_agent(
                 "Du kannst E2B mit `E2B_API_KEY` konfigurieren oder die Frage ohne Code-Ausfuehrung stellen."
             )
 
-    # Freitextfragen werden zuerst vom LLM anhand eines vorab berechneten
-    # Datenprofils beantwortet. Wenn dieser reine LLM-Call fehlschlaegt, wird
-    # optional die E2B-Sandbox probiert. Ein lokaler Dangerous-Code-Agent wird
-    # aus Sicherheitsgruenden nicht mehr verwendet.
+    # Fallback fuer Tests oder bewusst deaktivierte Sandbox. In der Streamlit-App
+    # ist use_sandbox=True fest gesetzt, damit der Agent am echten df arbeitet.
     try:
         return _run_llm_profile_analysis(
             dataframe=dataframe,
@@ -599,24 +590,6 @@ def _run_agent(
             temperature=temperature,
         )
     except Exception as llm_error:
-        if use_sandbox:
-            try:
-                return _run_sandboxed_code_analysis(
-                    dataframe=dataframe,
-                    source_name=source_name,
-                    user_prompt=user_prompt,
-                    api_key=api_key,
-                    api_base=api_base,
-                    model=model,
-                    temperature=temperature,
-                    sandbox_api_key=sandbox_api_key,
-                )
-            except Exception as sandbox_error:
-                raise RuntimeError(
-                    f"LLM-Profilanalyse fehlgeschlagen: {llm_error}; "
-                    f"E2B-Sandbox-Fallback fehlgeschlagen: {sandbox_error}"
-                ) from sandbox_error
-
         raise RuntimeError(
             f"LLM-Profilanalyse fehlgeschlagen: {llm_error}; "
             "lokale Agent-Code-Ausfuehrung ist aus Sicherheitsgruenden deaktiviert. "

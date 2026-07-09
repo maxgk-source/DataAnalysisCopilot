@@ -44,6 +44,17 @@ def _render_chat_payload(message: dict[str, Any]) -> None:
         st.image(figure_bytes)
 
 
+def _set_chat_dataframe(dataframe: pd.DataFrame, source_name: str, reset_on_change: bool = True) -> bool:
+    """Setzt die aktive Chat-Datenquelle und leert Verlauf nur bei Quellenwechsel."""
+    previous_source_name = st.session_state.get("chat_source_name")
+    source_changed = previous_source_name != source_name
+    st.session_state["chat_dataframe"] = dataframe
+    st.session_state["chat_source_name"] = source_name
+    if reset_on_change and source_changed:
+        st.session_state["chat_messages"] = []
+    return source_changed
+
+
 def render_langchain_agent(
     uploaded_df: Optional[pd.DataFrame] = None,
     db_df: Optional[pd.DataFrame] = None,
@@ -51,6 +62,8 @@ def render_langchain_agent(
     database_config: Optional[dict] = None,
     list_database_tables_func: Optional[Callable[[dict], list[str]]] = None,
     load_table_from_database_func: Optional[Callable[[dict, str, Optional[int]], pd.DataFrame]] = None,
+    save_dataframe_to_database_func: Optional[Callable[[pd.DataFrame, dict, str, str], None]] = None,
+    sanitize_table_name_func: Optional[Callable[[str], str]] = None,
 ) -> None:
     """
     Rendert den KI-Chat für Streamlit.
@@ -58,7 +71,7 @@ def render_langchain_agent(
     Parameter:
     - uploaded_df/db_df: bereits in der App geladene DataFrames
     - database_config: bestehende PostgreSQL-Konfiguration aus app.py
-    - list_database_tables_func/load_table_from_database_func: bestehende DB-Hilfsfunktionen
+    - list/load/save-Funktionen: bestehende DB-Hilfsfunktionen
     """
     st.header("KI-Chat für Datenanalyse")
     st.caption(
@@ -197,8 +210,7 @@ def render_langchain_agent(
                             int(max_rows),
                         )
                         chat_source_name = f"PostgreSQL-Tabelle: {selected_table}"
-                        st.session_state["chat_dataframe"] = chat_dataframe
-                        st.session_state["chat_source_name"] = chat_source_name
+                        _set_chat_dataframe(chat_dataframe, chat_source_name)
                         st.success(f"'{selected_table}' wurde für den KI-Chat geladen.")
                     except Exception as error:
                         st.error(f"Die Tabelle konnte nicht geladen werden: {error}")
@@ -206,15 +218,13 @@ def render_langchain_agent(
     elif selected_source_mode == "Bereits geladene PostgreSQL-/CSV-Daten verwenden":
         chat_dataframe = db_df
         chat_source_name = db_source_name
-        st.session_state["chat_dataframe"] = chat_dataframe
-        st.session_state["chat_source_name"] = chat_source_name
+        _set_chat_dataframe(chat_dataframe, chat_source_name)
         st.info(f"Aktive Quelle: {chat_source_name}")
 
     elif selected_source_mode == "Bereits hochgeladene Datei verwenden":
         chat_dataframe = uploaded_df
         chat_source_name = st.session_state.get("uploaded_source_name", "Bereits hochgeladene Datei")
-        st.session_state["chat_dataframe"] = chat_dataframe
-        st.session_state["chat_source_name"] = chat_source_name
+        _set_chat_dataframe(chat_dataframe, chat_source_name)
         st.info(f"Aktive Quelle: {chat_source_name}")
 
     elif selected_source_mode == "Datei hochladen":
@@ -225,14 +235,65 @@ def render_langchain_agent(
         )
 
         if agent_upload is not None:
+            uploaded_dataframe: Optional[pd.DataFrame] = None
             try:
-                chat_dataframe = _read_uploaded_file(agent_upload)
+                uploaded_dataframe = _read_uploaded_file(agent_upload)
+                chat_dataframe = uploaded_dataframe
                 chat_source_name = f"Upload im KI-Chat: {agent_upload.name}"
-                st.session_state["chat_dataframe"] = chat_dataframe
-                st.session_state["chat_source_name"] = chat_source_name
-                st.success(f"'{agent_upload.name}' wurde für den KI-Chat geladen.")
+                source_changed = _set_chat_dataframe(chat_dataframe, chat_source_name)
+                st.session_state["uploaded_dataframe"] = chat_dataframe
+                st.session_state["uploaded_source_name"] = chat_source_name
+                if source_changed:
+                    st.success(f"'{agent_upload.name}' wurde für den KI-Chat geladen.")
             except Exception as error:
                 st.error(f"Datei konnte nicht gelesen werden: {error}")
+
+            if (
+                uploaded_dataframe is not None
+                and database_config
+                and save_dataframe_to_database_func
+                and sanitize_table_name_func
+            ):
+                with st.expander("Aktuelle Datei optional in PostgreSQL speichern", expanded=False):
+                    default_table_name = sanitize_table_name_func(agent_upload.name)
+                    table_name_input = st.text_input(
+                        "Tabellenname",
+                        value=default_table_name,
+                        key="chat_upload_table_name",
+                    )
+                    table_name = sanitize_table_name_func(table_name_input)
+                    if table_name != table_name_input:
+                        st.caption(f"Bereinigter Tabellenname: `{table_name}`")
+
+                    if_exists_option = st.radio(
+                        "Wenn die Tabelle schon existiert",
+                        options=[
+                            "Fehler anzeigen",
+                            "Tabelle ersetzen",
+                            "Zeilen anhängen",
+                        ],
+                        horizontal=True,
+                        key="chat_upload_if_exists",
+                    )
+                    if_exists_mapping = {
+                        "Fehler anzeigen": "fail",
+                        "Tabelle ersetzen": "replace",
+                        "Zeilen anhängen": "append",
+                    }
+
+                    if st.button("In PostgreSQL speichern", key="save_chat_upload_to_database"):
+                        try:
+                            save_dataframe_to_database_func(
+                                uploaded_dataframe,
+                                database_config,
+                                table_name,
+                                if_exists_mapping[if_exists_option],
+                            )
+                            chat_source_name = f"Hochgeladene Datei / PostgreSQL-Tabelle: {table_name}"
+                            st.session_state["chat_source_name"] = chat_source_name
+                            st.success(f"Die Datei wurde als Tabelle '{table_name}' gespeichert.")
+                        except Exception as error:
+                            st.error(f"Die Datei konnte nicht in PostgreSQL gespeichert werden: {error}")
 
     st.divider()
     st.subheader("2. Chat")
