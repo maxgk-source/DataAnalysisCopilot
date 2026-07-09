@@ -3,24 +3,17 @@ Data Analysis Copilot
 Was diese App macht:
 1. Sie zeigt eine Streamlit-Webseite an.
 2. Sie verbindet sich mit einer PostgreSQL-Serverdatenbank.
-3. Man kann vorhandene PostgreSQL-Tabellen laden und analysieren und CSV-Dateien auf der Webseite hochladen.
-4. Hochgeladene CSV-Dateien können als neue PostgreSQL-Tabelle gespeichert werden.
-5. Die Datenanalyse läuft anschließend über Apache Spark.
+3. Man kann CSV-Dateien oder PostgreSQL-Tabellen in den KI-Chat laden.
+4. Hochgeladene Dateien können optional als neue PostgreSQL-Tabelle gespeichert werden.
+5. Der KI-Agent analysiert die Daten per pandas-Code in einer Sandbox.
 """
 
 
-# io hilft uns, Bytes wie eine Datei zu behandeln.
-# Das brauchen wir, wenn Streamlit eine CSV-Datei hochlädt.
-import io
 # os hilft beim Arbeiten mit Betriebssystem-Funktionen:
 import os
 # re steht für Regular Expressions.
 # Damit kann man Texte bereinigen, z. B. ungültige Zeichen aus Tabellennamen entfernen.
 import re
-# tempfile erstellt temporäre Dateien.
-# Spark liest CSV-Dateien am einfachsten über einen Dateipfad.
-# Deshalb speichern wir hochgeladene CSVs kurz temporär ab.
-import tempfile
 # quote_plus macht Texte sicher für eine Datenbank-URL.
 # Beispiel: Ein Passwort mit Sonderzeichen wird dadurch korrekt in die URL eingebaut.
 from urllib.parse import quote_plus
@@ -33,11 +26,7 @@ import pandas as pd
 # streamlit baut die Web-Oberfläche.
 # Alles mit st. erscheint später auf der Webseite.
 import streamlit as st
-# Spark ist gut für größere Datenmengen und DataFrame-Analysen.
-from pyspark.sql import SparkSession
-# functions enthält Spark-Funktionen wie count, when, isnan, col usw.
-# importieren als F, damit der Code kürzer bleibt.
-from pyspark.sql import functions as F
+from chat_memory import render_chat_memory_panel
 from langchain_agent import render_langchain_agent
 
 # PostgreSQL verbindt man über SQLAlchemy + psycopg2.
@@ -59,24 +48,6 @@ st.set_page_config(page_title="Data Analysis Copilot", layout="wide")
 
 # title erzeugt die große Überschrift auf der Webseite.
 st.title("Data Analysis Copilot")
-
-
-# SPARK-SESSION
-# Eine SparkSession ist wie der Motor von Spark.
-# Ohne SparkSession kann Spark keine Daten lesen oder analysieren.
-
-@st.cache_resource
-# cache_resource bedeutet:
-# Streamlit merkt sich dieses Objekt zwischen Reloads. Ohne Cache würde Spark ständig neu starten.
-# Das ist bei Spark wichtig, weil Spark relativ teuer zu starten ist.
-def get_spark_session():
-    spark = (
-        SparkSession.builder
-        .appName("DataAnalysisCopilot")# Name der Spark-App. Er erscheint z. B. in Spark-Logs.
-        .master("local[*]") # local[*] bedeutet: Spark läuft dem lokalen Rechner und darf alle verfügbaren CPU-Kerne verwenden.
-        .getOrCreate() # Wenn schon eine SparkSession existiert, nimm sie. # Sonst erstelle eine neue.
-    )
-    return spark
 
 
 #HILFSFUNKTIONEN die man mehrfach benutzen kann.Hauptcode bleibt übersichtlicher.
@@ -109,18 +80,6 @@ def build_table_reference(table_name: str) -> str:
     # Wir geben hier kein Schema mehr an. PostgreSQL nutzt dadurch automatisch
     # das Standard-Schema der Verbindung, meistens public.
     return quote_identifier(table_name)
-
-
-def dataframe_to_csv_bytes(dataframe: pd.DataFrame) -> bytes:
-    #Wandelt ein pandas DataFrame in CSV-Bytes um, weil der download_button Daten als bytes oder string erwartet.
-    # index=False entfernt die zeilenummern aus der CSV, damit sie sauberer aussieht.
-    return dataframe.to_csv(index=False).encode("utf-8")
-
-
-def spark_column(column_name: str):
-    #Warum nicht einfach F.col(column_name)? Weil Spalten mit Leerzeichen, Punkte oder Sonderzeichen von Spark sonst falsch intertpretiert werden könnten.
-    escaped_column_name = column_name.replace("`", "``")
-    return F.col(f"`{escaped_column_name}`")
 
 
 # POSTGRESQL-FUNKTIONEN
@@ -232,27 +191,20 @@ def load_table_from_database(
     )
 
 
-def save_csv_to_database(
-    #Liest eine hochgeladene CSV-Datei und speichert sie als PostgreSQL-Tabelle.
-    # SL Datei als Byte -> pd liest Byte als CSV -> pd speichert CSV in PostgreSQL -> Rückgabe des DataFrames für Vorschau
-    uploaded_file,
+def save_loaded_dataframe_to_database(
+    dataframe: pd.DataFrame,
     config: dict,
     table_name: str,
     if_exists: str,
-) -> pd.DataFrame:
-    csv_bytes = uploaded_file.getvalue()
-    dataframe = pd.read_csv(io.BytesIO(csv_bytes))
-
+) -> None:
+    #Speichert ein bereits geladenes pandas DataFrame aus dem KI-Chat in PostgreSQL.
     engine = get_engine_from_config(config)
-
     save_dataframe_to_postgres(
         dataframe=dataframe,
         engine=engine,
         table_name=table_name,
         if_exists=if_exists,
     )
-
-    return dataframe
 
 
 def database_label(config: dict) -> str:
@@ -261,104 +213,6 @@ def database_label(config: dict) -> str:
         f"PostgreSQL: {config['pg_username']}@{config['pg_host']}:"
         f"{config['pg_port']}/{config['pg_database']}"
     )
-
-
-# Datenanalyse mit Spark
-
-def render_spark_analysis(df_spark, source_name: str):
-    #Zeigt eine Spark-Analyse in der Streamlit-Oberfläche.
-    #cache merkt sich das DataFrame im Speicher. Dadurch muss Spark es nicht bei jeder folgenden Aktion neu berechnen.
-    df_spark = df_spark.cache()
-
-    try:
-        # count() zählt die Zeilen.
-        # Achtung: Bei sehr großen Daten kann das dauern.
-        row_count = df_spark.count()
-
-        # columns ist eine Liste aller Spaltennamen.
-        column_count = len(df_spark.columns)
-        
-        # Zwei Spalten in der UI für Kennzahlen.
-        metric_col_1, metric_col_2 = st.columns(2)
-        metric_col_1.metric("Anzahl Zeilen", row_count)
-        metric_col_2.metric("Anzahl Spalten", column_count)
-
-        # Datenvorschau anzeigen.
-        st.write("Datenvorschau:")
-        st.dataframe(df_spark.limit(10).toPandas(), use_container_width=True)
-
-        # Spaltennamen anzeigen.
-        st.subheader("Spaltennamen")
-        st.write(df_spark.columns)
-
-        # Datentypen anzeigen.
-        st.subheader("Datentypen")
-        st.dataframe(pd.DataFrame(df_spark.dtypes, columns=["Spalte", "Datentyp"]),use_container_width=True,)
-
-        # describe berechnet einfache Statistik.
-        # Bei Textspalten zeigt Spark z. B. count, min, max.
-        # Bei Zahlen zusätzlich mean, stddev usw.
-        st.subheader("Statistische Analyse")
-        st.dataframe(df_spark.describe().toPandas(), use_container_width=True)
-
-        # Fehlende Werte pro Spalte zählen.
-        st.subheader("Fehlende Werte")
-
-        missing_value_expressions = []
-
-        for column_name, data_type in df_spark.dtypes:
-          column = spark_column(column_name)
-          missing_condition = column.isNull()
-          # Bei float/double gibt es zusätzlich NaN.
-          # NaN bedeutet "Not a Number" und ist nicht dasselbe wie NULL.
-          if data_type in ["float", "double"]:
-               missing_condition = missing_condition | F.isnan(column)
-
-          missing_value_expressions.append(
-               F.count(F.when(missing_condition, column_name)).alias(column_name)
-           )
-
-        if missing_value_expressions:
-            missing_values = df_spark.select(missing_value_expressions)
-            st.dataframe(missing_values.toPandas(), use_container_width=True)
-        else:
-            st.info("Die Datenquelle enthält keine Spalten.")
-
-    finally:
-        # unpersist entfernt das gecachte DataFrame wieder aus Spark.
-        # Das spart Speicher.
-        df_spark.unpersist()
-
-
-def analyze_csv_bytes_with_spark(csv_bytes: bytes, source_name: str):
-    #Einen temporären Pfad für die CSV-Datei erstellen, damit Spark sie lesen kann. Und danach wieder löschen, damit keine temporären Dateien auf dem Server liegen bleiben.
-    spark = get_spark_session()
-    tmp_path = None
-
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_file:
-            tmp_file.write(csv_bytes)
-            tmp_path = tmp_file.name
-
-        df_spark = (
-            spark.read
-            # Erste Zeile enthält Spaltennamen.
-            .option("header", "true")
-            # Spark soll Datentypen automatisch erkennen.
-            .option("inferSchema", "true")
-            # Erlaubt CSV-Felder mit Zeilenumbrüchen.
-            .option("multiLine", "true")
-            # Escape-Zeichen für Anführungszeichen.
-            .option("escape", '"')
-            .csv(tmp_path)
-        )
-
-        render_spark_analysis(df_spark, source_name)
-
-    finally:
-        # Temporäre Datei immer löschen, auch wenn vorher ein Fehler passiert.
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
 
 
 # SIDEBAR Konfiguration für die PostgreSQL-Verbindung Die Sidebar ist der linke Bereich
@@ -420,197 +274,14 @@ if st.sidebar.button("PostgreSQL-Verbindung testen"):
         st.sidebar.error(f"Verbindung fehlgeschlagen: {error}")
 
 
-# HAUPTBEREICH: DREI BEREICHE
-# Bereich 1: Tabellen aus PostgreSQL laden und analysieren.
-# Bereich 2: CSV hochladen und in PostgreSQL speichern.
-# Bereich 3: KI-Chat mit LangChain-Agent.
+# HAUPTBEREICH: KI-CHAT MIT RECHTEM CHAT-SPEICHER
+_uploaded_df = st.session_state.get("uploaded_dataframe", None)
+_db_df = st.session_state.get("active_dataframe", None)
+_db_source = st.session_state.get("active_source_name", "Datenbanktabelle")
 
-TAB_DATABASE = "Aus PostgreSQL laden & analysieren"
-TAB_UPLOAD = "CSV hochladen & in PostgreSQL speichern"
-TAB_CHAT = "KI-Chat"
+chat_column, memory_column = st.columns([0.72, 0.28], gap="large")
 
-selected_main_tab = st.radio(
-    "Bereich",
-    options=[TAB_DATABASE, TAB_UPLOAD, TAB_CHAT],
-    horizontal=True,
-    key="selected_main_tab",
-)
-
-previous_main_tab = st.session_state.get("previous_main_tab")
-if previous_main_tab is not None and previous_main_tab != selected_main_tab:
-    st.session_state["chat_messages"] = []
-st.session_state["previous_main_tab"] = selected_main_tab
-
-
-# TAB 1: AUS POSTGRESQL LADEN UND ANALYSIEREN
-if selected_main_tab == TAB_DATABASE:
-    st.header("Daten aus PostgreSQL analysieren")
-
-
-    # Eingabe für maximale Zeilen.
-    # Bei 0 werden alle Zeilen geladen.
-    max_rows = st.number_input(
-        "Maximale Zeilen laden, 0 = alle Zeilen", # Ohne name erscheint das feld nicht 
-        min_value=0,
-        value=0,
-        step=1000,
-    )
-
-    # Tabellen aus PostgreSQL lesen.
-    try:
-        tables = list_database_tables(database_config) #liste mit welchen Tabellen in der Datenbank sind
-    except Exception as error:
-        # Wenn z. B. Zugangsdaten falsch sind, zeigen wir den Fehler in der App.
-        st.error(f"PostgreSQL konnte nicht gelesen werden: {error}")
-        tables = []
-
-    if not tables:
-        st.info(
-            "In der verbundenen PostgreSQL-Datenbank gibt es noch keine Tabellen oder sie konnten nicht gelesen werden. "
-        )
-    else:
-        selected_table = st.selectbox( #Auswahlfeld für die Tabellen, die in der Datenbank gefunden wurden.
-            "Tabelle auswählen",
-            options=tables,
-            key="selected_database_table",
-        )
-
-        if st.button("Laden/Analysieren"):
-            try:
-                pandas_dataframe = load_table_from_database( # damit wird die tabelle geladen und in pandas dataframe umgewandelt
-                    config=database_config,
-                    table_name=selected_table,
-                    max_rows=max_rows if max_rows > 0 else None,
-                )
-                st.session_state["active_dataframe"] = pandas_dataframe
-                st.session_state["active_source_name"] = f"PostgreSQL-Tabelle: {selected_table}"
-                st.success(f"Tabelle '{selected_table}' wurde geladen.")
-
-                st.download_button( #erscheint erst wenn eine Tabelle geladen wurde. 
-                    label="Tabelle als CSV herunterladen",
-                    data=dataframe_to_csv_bytes(pandas_dataframe),
-                    file_name=f"{selected_table}.csv",
-                    mime="text/csv",
-                )
-
-                analyze_csv_bytes_with_spark(
-                    csv_bytes=dataframe_to_csv_bytes(pandas_dataframe),
-                    source_name=f"PostgreSQL-Tabelle: {selected_table}",
-                )
-
-            except Exception as error:
-                st.error(f"Die Tabelle konnte nicht geladen werden: {error}")
-
-# TAB 2: CSV HOCHLADEN UND ALS POSTGRESQL-TABELLE SPEICHERN
-elif selected_main_tab == TAB_UPLOAD:
-    st.header("CSV-Datei hochladen und in PostgreSQL speichern")
-
-    uploaded_file = st.file_uploader( # hochladen einer csv datei 
-        "CSV-Datei hochladen",
-        type=["csv","json"], #nur csv oder json dateien werden akzeptiert
-        key="main_csv_upload",
-    )
-
-    if uploaded_file is None:
-        st.info("Bitte lade eine CSV-Datei hoch.")
-    else:
-        # Standard-Tabellenname wird aus dem Dateinamen erstellt.
-        default_table_name = sanitize_table_name(uploaded_file.name)
-
-        table_name_input = st.text_input(
-            "Name der neuen PostgreSQL-Tabelle",
-            value=default_table_name,
-
-        )
-
-        table_name = sanitize_table_name(table_name_input)
-
-        if table_name != table_name_input:
-            st.caption(f"Bereinigter Tabellenname: `{table_name}`")
-
-        if_exists_option = st.radio(
-            "Was soll passieren, wenn die Tabelle schon existiert?",
-            options=[
-                "Fehler anzeigen",
-                "Tabelle ersetzen",
-                "Zeilen anhängen",
-            ],
-            horizontal=True,
-        )
-
-        # pandas.to_sql versteht englische Werte.
-        # Diese Mapping-Tabelle übersetzt UI-Text in pandas-Werte.
-        if_exists_mapping = {
-            "Fehler anzeigen": "fail",
-            "Tabelle ersetzen": "replace",
-            "Zeilen anhängen": "append",
-        }
-
-        analyze_uploaded_file = st.checkbox(
-            "Hochgeladene CSV direkt analysieren",
-            value=True,
-        )
-
-        save_button = st.button("CSV in PostgreSQL speichern")
-
-        if save_button:
-            try:
-                saved_dataframe = save_csv_to_database(
-                    uploaded_file=uploaded_file,
-                    config=database_config,
-                    table_name=table_name,
-                    if_exists=if_exists_mapping[if_exists_option],
-                ) 
-
-                st.session_state["active_dataframe"] = saved_dataframe
-                st.session_state["active_source_name"] = f"Hochgeladene CSV / PostgreSQL-Tabelle: {table_name}"
-                st.success(f"CSV wurde als Tabelle '{table_name}' in PostgreSQL gespeichert.")
-
-                st.write("Vorschau der gespeicherten Daten:")
-                st.dataframe(saved_dataframe.head(10), use_container_width=True)
-
-            except ValueError as error:
-                # Typischer Fall: Tabelle existiert schon und if_exists="fail".
-                st.error(
-                    "Die Tabelle existiert bereits oder die Eingabe ist ungültig. "
-                    "Wähle entweder 'Tabelle ersetzen' oder 'Zeilen anhängen', falls du die vorhandene Tabelle ändern willst."
-                )
-                st.exception(error)
-
-            except Exception as error:
-                # Alle anderen Fehler, z. B. falsche Datenbankverbindung oder kaputte CSV.
-                st.error(f"Die CSV-Datei konnte nicht gespeichert werden: {error}")
-
-        # Wenn die Checkbox aktiv ist, wird die hochgeladene CSV direkt analysiert.
-        # Das passiert unabhängig davon, ob sie schon gespeichert wurde.
-        if analyze_uploaded_file:
-            analyze_csv_bytes_with_spark(
-                csv_bytes=uploaded_file.getvalue(),
-                source_name=f"Hochgeladene CSV: {uploaded_file.name}",
-            )
-
-        # Hochgeladenes DataFrame für den Agenten im Session State merken
-        if uploaded_file is not None:
-            try:
-                import io as _io
-                import pandas as _pd
-                _df_upload = _pd.read_csv(_io.BytesIO(uploaded_file.getvalue()))
-                st.session_state["uploaded_dataframe"] = _df_upload
-                st.session_state["uploaded_source_name"] = (
-                    f"Hochgeladene CSV: {uploaded_file.name}"
-                )
-            except Exception:
-                pass  # Spark übernimmt die eigentliche Analyse
-
-
-# ---------------------------------------------------------------------------
-# TAB 3: KI-CHAT MIT LANGCHAIN-AGENT
-# ---------------------------------------------------------------------------
-elif selected_main_tab == TAB_CHAT:
-    _uploaded_df = st.session_state.get("uploaded_dataframe", None)
-    _db_df = st.session_state.get("active_dataframe", None)
-    _db_source = st.session_state.get("active_source_name", "Datenbanktabelle")
-
+with chat_column:
     render_langchain_agent(
         uploaded_df=_uploaded_df,
         db_df=_db_df,
@@ -618,4 +289,9 @@ elif selected_main_tab == TAB_CHAT:
         database_config=database_config,
         list_database_tables_func=list_database_tables,
         load_table_from_database_func=load_table_from_database,
+        save_dataframe_to_database_func=save_loaded_dataframe_to_database,
+        sanitize_table_name_func=sanitize_table_name,
     )
+
+with memory_column:
+    render_chat_memory_panel()
