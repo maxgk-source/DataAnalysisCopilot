@@ -26,6 +26,7 @@ import pandas as pd
 # streamlit baut die Web-Oberfläche.
 # Alles mit st. erscheint später auf der Webseite.
 import streamlit as st
+from chat_memory import render_chat_memory_panel
 from langchain_agent import render_langchain_agent
 
 # PostgreSQL verbindt man über SQLAlchemy + psycopg2.
@@ -273,18 +274,24 @@ if st.sidebar.button("PostgreSQL-Verbindung testen"):
         st.sidebar.error(f"Verbindung fehlgeschlagen: {error}")
 
 
-# HAUPTBEREICH: KI-CHAT MIT DATENQUELLE
+# HAUPTBEREICH: KI-CHAT MIT RECHTEM CHAT-SPEICHER
 _uploaded_df = st.session_state.get("uploaded_dataframe", None)
 _db_df = st.session_state.get("active_dataframe", None)
 _db_source = st.session_state.get("active_source_name", "Datenbanktabelle")
 
-render_langchain_agent(
-    uploaded_df=_uploaded_df,
-    db_df=_db_df,
-    db_source_name=_db_source,
-    database_config=database_config,
-    list_database_tables_func=list_database_tables,
-    load_table_from_database_func=load_table_from_database,
-    save_dataframe_to_database_func=save_loaded_dataframe_to_database,
-    sanitize_table_name_func=sanitize_table_name,
-)
+chat_column, memory_column = st.columns([0.72, 0.28], gap="large")
+
+with chat_column:
+    render_langchain_agent(
+        uploaded_df=_uploaded_df,
+        db_df=_db_df,
+        db_source_name=_db_source,
+        database_config=database_config,
+        list_database_tables_func=list_database_tables,
+        load_table_from_database_func=load_table_from_database,
+        save_dataframe_to_database_func=save_loaded_dataframe_to_database,
+        sanitize_table_name_func=sanitize_table_name,
+    )
+
+with memory_column:
+    render_chat_memory_panel()

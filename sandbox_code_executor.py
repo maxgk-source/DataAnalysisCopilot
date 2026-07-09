@@ -11,6 +11,7 @@ import base64
 import io
 import os
 import re
+import textwrap
 from typing import Any, Optional
 
 import pandas as pd
@@ -18,12 +19,16 @@ import pandas as pd
 
 _SANDBOX_SETUP = """
 import base64, io
+import warnings
 import pandas as pd
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 df = pd.read_csv('/home/user/data.csv')
 for col in df.columns:
@@ -68,6 +73,15 @@ class SandboxUnavailableError(RuntimeError):
 
 class UnsafeGeneratedCodeError(ValueError):
     """Raised when generated code contains blocked operations."""
+
+
+def _load_dotenv_if_available() -> None:
+    """Laedt .env wie im E2B-Beispiel, falls python-dotenv installiert ist."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv()
 
 
 _ALLOWED_IMPORT_ROOTS = {
@@ -133,12 +147,81 @@ _BLOCKED_METHOD_NAMES = {
 }
 
 
+def _clean_code_lines(lines: list[str]) -> str:
+    cleaned_lines = []
+    for line in lines:
+        cleaned_line = line.rstrip()
+        stripped = cleaned_line.strip()
+        if stripped.startswith("```") or stripped == "`":
+            continue
+
+        # Entfernt typische nummerierte Listen aus LLM-Antworten:
+        # "1. code", "1) code" oder "1: code".
+        numbered = re.match(r"^(\s*)\d+[\.\):]\s+(.*)$", cleaned_line)
+        if numbered:
+            cleaned_line = f"{numbered.group(1)}{numbered.group(2)}"
+
+        cleaned_lines.append(cleaned_line)
+
+    return textwrap.dedent("\n".join(cleaned_lines)).strip().strip("`").strip()
+
+
 def strip_code_fences(text: str) -> str:
     """Extrahiert Python-Code aus einer LLM-Antwort."""
-    fenced = re.search(r"```(?:python)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    fenced = re.search(r"```\s*(?:python)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
     if fenced:
-        return fenced.group(1).strip()
-    return text.strip()
+        return _clean_code_lines(fenced.group(1).splitlines())
+
+    cleaned_text = _clean_code_lines(text.strip().splitlines())
+    try:
+        ast.parse(cleaned_text)
+        return cleaned_text
+    except SyntaxError:
+        pass
+
+    lines = text.strip().splitlines()
+    code_lines = []
+    code_started = False
+    code_start_patterns = (
+        "import ",
+        "from ",
+        "df",
+        "result",
+        "print(",
+        "plt.",
+        "sns.",
+        "fig",
+        "ax",
+        "if ",
+        "for ",
+        "while ",
+        "try:",
+        "with ",
+    )
+
+    for line in lines:
+        raw_line = line.rstrip()
+        stripped = raw_line.strip()
+        if not stripped:
+            if code_started:
+                code_lines.append("")
+            continue
+
+        if stripped.startswith("```") or stripped == "`":
+            continue
+
+        numbered = re.match(r"^\d+[\.\):]\s+(.*)$", stripped)
+        if numbered:
+            stripped = numbered.group(1)
+
+        assignment_like = re.match(r"^[A-Za-z_][A-Za-z0-9_]*\s*=", stripped)
+        if not code_started and not (stripped.startswith(code_start_patterns) or assignment_like):
+            continue
+
+        code_started = True
+        code_lines.append(raw_line)
+
+    return _clean_code_lines(code_lines) if code_lines else _clean_code_lines(text.strip().splitlines())
 
 
 def _root_name(node: ast.AST) -> Optional[str]:
@@ -148,6 +231,24 @@ def _root_name(node: ast.AST) -> Optional[str]:
     if isinstance(current, ast.Name):
         return current.id
     return None
+
+
+def _stderr_is_warning_only(stderr: str) -> bool:
+    """Erkennt stderr-Ausgaben, die nur Python-Warnungen enthalten."""
+    text = stderr.strip()
+    if not text:
+        return False
+    warning_markers = [
+        "Warning:",
+        "FutureWarning:",
+        "DeprecationWarning:",
+        "UserWarning:",
+        "RuntimeWarning:",
+    ]
+    error_markers = ["Traceback (most recent call last):", "Error:", "Exception:"]
+    return any(marker in text for marker in warning_markers) and not any(
+        marker in text for marker in error_markers
+    )
 
 
 def validate_generated_code(code: str) -> None:
@@ -196,6 +297,8 @@ class E2BSandbox:
     """Kleine E2B-Huelle fuer pandas-Analysen."""
 
     def __init__(self, dataframe: pd.DataFrame, api_key: Optional[str] = None, timeout: int = 600):
+        _load_dotenv_if_available()
+
         if api_key:
             os.environ["E2B_API_KEY"] = api_key
 
@@ -212,7 +315,7 @@ class E2BSandbox:
             ) from error
 
         if hasattr(_Sandbox, "create"):
-            self._sbx = _Sandbox.create(timeout=timeout)
+            self._sbx = _Sandbox.create()
         else:
             self._sbx = _Sandbox(timeout=timeout)
 
@@ -228,12 +331,16 @@ class E2BSandbox:
             "figure_bytes": None,
             "table": None,
             "error": None,
+            "warning": None,
             "code": code,
         }
 
         stderr = "\n".join(getattr(execution.logs, "stderr", []) or [])
         if stderr.strip():
-            result["error"] = stderr
+            if _stderr_is_warning_only(stderr):
+                result["warning"] = stderr
+            else:
+                result["error"] = stderr
 
         try:
             b64 = self._sbx.files.read("/home/user/_fig.b64")

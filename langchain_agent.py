@@ -44,6 +44,21 @@ def _render_chat_payload(message: dict[str, Any]) -> None:
         st.image(figure_bytes)
 
 
+def _recent_chat_context(messages: list[dict[str, Any]], max_messages: int = 8, max_chars: int = 3000) -> str:
+    """Verdichtet den letzten Chatverlauf fuer Follow-up-Fragen."""
+    context_lines = []
+    for message in messages[-max_messages:]:
+        role = str(message.get("role", "")).strip()
+        content = str(message.get("content", "")).strip()
+        if role and content:
+            context_lines.append(f"{role}: {content}")
+
+    context = "\n".join(context_lines)
+    if len(context) > max_chars:
+        return context[-max_chars:]
+    return context
+
+
 def _set_chat_dataframe(dataframe: pd.DataFrame, source_name: str, reset_on_change: bool = True) -> bool:
     """Setzt die aktive Chat-Datenquelle und leert Verlauf nur bei Quellenwechsel."""
     previous_source_name = st.session_state.get("chat_source_name")
@@ -52,6 +67,9 @@ def _set_chat_dataframe(dataframe: pd.DataFrame, source_name: str, reset_on_chan
     st.session_state["chat_source_name"] = source_name
     if reset_on_change and source_changed:
         st.session_state["chat_messages"] = []
+        st.session_state.pop("opened_saved_chat_id", None)
+        st.session_state.pop("opened_saved_chat_title", None)
+        st.session_state.pop("opened_saved_chat_source_name", None)
     return source_changed
 
 
@@ -298,8 +316,30 @@ def render_langchain_agent(
     st.divider()
     st.subheader("2. Chat")
 
+    if "chat_messages" not in st.session_state:
+        st.session_state["chat_messages"] = []
+
     if chat_dataframe is None:
-        st.info("Wähle zuerst eine Datenquelle aus.")
+        if st.session_state["chat_messages"]:
+            opened_title = st.session_state.get("opened_saved_chat_title", "Gespeicherter Chat")
+            st.write(f"**Geöffneter Chatverlauf:** {opened_title}")
+
+            if st.button("Chatverlauf löschen", key="clear_chat_messages_without_data"):
+                st.session_state["chat_messages"] = []
+                st.session_state.pop("opened_saved_chat_id", None)
+                st.session_state.pop("opened_saved_chat_title", None)
+                st.session_state.pop("opened_saved_chat_source_name", None)
+                st.rerun()
+
+            chat_container = st.container()
+            with chat_container:
+                for message in st.session_state["chat_messages"]:
+                    with st.chat_message(message["role"]):
+                        _render_chat_payload(message)
+
+            st.info("Lade eine Datenquelle, um zu diesem Chat neue Analysefragen zu stellen.")
+        else:
+            st.info("Wähle zuerst eine Datenquelle aus oder öffne rechts einen gespeicherten Chat.")
         return
 
     st.write(f"**Aktive Datenquelle:** {chat_source_name}")
@@ -311,74 +351,88 @@ def render_langchain_agent(
     with st.expander("Datenvorschau anzeigen", expanded=True):
         st.dataframe(chat_dataframe.head(10), use_container_width=True)
 
-    if "chat_messages" not in st.session_state:
-        st.session_state["chat_messages"] = []
-
     if st.button("Chatverlauf löschen", key="clear_chat_messages"):
         st.session_state["chat_messages"] = []
+        st.session_state.pop("opened_saved_chat_id", None)
+        st.session_state.pop("opened_saved_chat_title", None)
+        st.session_state.pop("opened_saved_chat_source_name", None)
         st.rerun()
 
-    for message in st.session_state["chat_messages"]:
-        with st.chat_message(message["role"]):
-            _render_chat_payload(message)
+    chat_container = st.container()
+    with chat_container:
+        for message in st.session_state["chat_messages"]:
+            with st.chat_message(message["role"]):
+                _render_chat_payload(message)
 
-    prompt = st.chat_input(
-        "Analyseauftrag eingeben, z. B. 'Welche Spalten haben die meisten fehlenden Werte?'"
-    )
+    with st.form("chat_prompt_form", clear_on_submit=True):
+        prompt_input = st.text_area(
+            "Analyseauftrag",
+            placeholder="Analyseauftrag eingeben, z. B. 'Welche Spalten haben die meisten fehlenden Werte?'",
+            height=80,
+            key="chat_prompt_input",
+            label_visibility="collapsed",
+        )
+        submitted = st.form_submit_button("Senden", use_container_width=True)
+
+    prompt = prompt_input.strip() if submitted else ""
 
     if prompt:
+        previous_messages = list(st.session_state["chat_messages"])
+        conversation_context = _recent_chat_context(previous_messages)
         st.session_state["chat_messages"].append({"role": "user", "content": prompt})
 
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Agent analysiert die Daten..."):
-                answer_message: dict[str, Any]
-                try:
-                    agent_result = _run_agent(
-                        dataframe=chat_dataframe,
-                        source_name=chat_source_name,
-                        user_prompt=prompt,
-                        api_key=api_key,
-                        api_base=api_base,
-                        model=model,
-                        temperature=temperature,
-                        use_sandbox=True,
-                        sandbox_api_key=e2b_api_key,
-                    )
-                    if isinstance(agent_result, dict):
-                        answer_message = {"role": "assistant", **agent_result}
-                    else:
-                        answer_message = {"role": "assistant", "content": str(agent_result)}
-                    _render_chat_payload(answer_message)
-                except Exception as error:
-                    error_text = str(error)
-                    if "Model Not Found" in error_text or "model" in error_text.lower() and "not found" in error_text.lower():
-                        answer = (
-                            "Fehler beim Ausführen des LangChain-Agenten: Model Not Found. "
-                            "Die Modell-ID ist für AcademicCloud/SAIA nicht verfügbar. "
-                            "Wähle oben in den Modell-Einstellungen ein anderes Modell, z. B. "
-                            "`meta-llama-3.1-8b-instruct` oder `qwen3-30b-a3b-instruct-2507`."
+            with st.chat_message("assistant"):
+                with st.spinner("Agent analysiert die Daten..."):
+                    answer_message: dict[str, Any]
+                    try:
+                        agent_result = _run_agent(
+                            dataframe=chat_dataframe,
+                            source_name=chat_source_name,
+                            user_prompt=prompt,
+                            api_key=api_key,
+                            api_base=api_base,
+                            model=model,
+                            temperature=temperature,
+                            use_sandbox=True,
+                            sandbox_api_key=e2b_api_key,
+                            conversation_context=conversation_context,
                         )
-                    elif "iteration limit" in error_text.lower() or "time limit" in error_text.lower():
-                        answer = (
-                            "Der Agent ist in eine zu lange Tool-Schleife gelaufen. "
-                            "Für einfache Maximum-/Minimum-, Missing-Values- und Überblicksfragen nutzt diese Version nun zuerst eine direkte pandas-Auswertung. "
-                            "Bitte lade die v6-Dateien neu oder stelle die Frage mit exaktem Spaltennamen, z. B. `Gib mir die Zeile mit dem höchsten year_of_study`."
-                        )
-                    elif "500" in error_text or "internal server" in error_text.lower() or "server error" in error_text.lower():
-                        answer = (
-                            "Der LLM-Endpunkt hat einen Serverfehler 500 zurückgegeben. "
-                            "Ich gebe dir deshalb eine direkte pandas-Zusammenfassung ohne LLM/API-Call:\n\n"
-                            + _build_direct_dataset_overview(chat_dataframe, chat_source_name)
-                        )
-                    else:
-                        answer = f"Fehler beim Ausführen des LangChain-Agenten: {error}"
-                    if answer.startswith("Der LLM-Endpunkt hat einen Serverfehler 500"):
-                        st.markdown(answer)
-                    else:
-                        st.error(answer)
-                    answer_message = {"role": "assistant", "content": answer}
+                        if isinstance(agent_result, dict):
+                            answer_message = {"role": "assistant", **agent_result}
+                        else:
+                            answer_message = {"role": "assistant", "content": str(agent_result)}
+                        _render_chat_payload(answer_message)
+                    except Exception as error:
+                        error_text = str(error)
+                        if "Model Not Found" in error_text or "model" in error_text.lower() and "not found" in error_text.lower():
+                            answer = (
+                                "Fehler beim Ausführen des LangChain-Agenten: Model Not Found. "
+                                "Die Modell-ID ist für AcademicCloud/SAIA nicht verfügbar. "
+                                "Wähle oben in den Modell-Einstellungen ein anderes Modell, z. B. "
+                                "`meta-llama-3.1-8b-instruct` oder `qwen3-30b-a3b-instruct-2507`."
+                            )
+                        elif "iteration limit" in error_text.lower() or "time limit" in error_text.lower():
+                            answer = (
+                                "Der Agent ist in eine zu lange Tool-Schleife gelaufen. "
+                                "Für einfache Maximum-/Minimum-, Missing-Values- und Überblicksfragen nutzt diese Version nun zuerst eine direkte pandas-Auswertung. "
+                                "Bitte lade die v6-Dateien neu oder stelle die Frage mit exaktem Spaltennamen, z. B. `Gib mir die Zeile mit dem höchsten year_of_study`."
+                            )
+                        elif "500" in error_text or "internal server" in error_text.lower() or "server error" in error_text.lower():
+                            answer = (
+                                "Der LLM-Endpunkt hat einen Serverfehler 500 zurückgegeben. "
+                                "Ich gebe dir deshalb eine direkte pandas-Zusammenfassung ohne LLM/API-Call:\n\n"
+                                + _build_direct_dataset_overview(chat_dataframe, chat_source_name)
+                            )
+                        else:
+                            answer = f"Fehler beim Ausführen des LangChain-Agenten: {error}"
+                        if answer.startswith("Der LLM-Endpunkt hat einen Serverfehler 500"):
+                            st.markdown(answer)
+                        else:
+                            st.error(answer)
+                        answer_message = {"role": "assistant", "content": answer}
 
         st.session_state["chat_messages"].append(answer_message)

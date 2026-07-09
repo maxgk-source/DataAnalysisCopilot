@@ -1,1 +1,3 @@
 .streamlit/local_secrets.toml
+.chat_memory/
+.env
