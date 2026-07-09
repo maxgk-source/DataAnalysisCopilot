@@ -270,7 +270,7 @@ def render_chat_memory_panel() -> None:
                     except Exception as error:
                         st.error(f"Chat konnte nicht geöffnet werden: {error}")
             with delete_col:
-                if st.button("Loeschen", key=f"delete_chat_{chat.get('id')}", use_container_width=True):
+                if st.button("Löschen", key=f"delete_chat_{chat.get('id')}", use_container_width=True):
                     delete_chat(str(chat.get("id")))
                     if st.session_state.get("opened_saved_chat_id") == str(chat.get("id")):
                         st.session_state.pop("opened_saved_chat_id", None)
